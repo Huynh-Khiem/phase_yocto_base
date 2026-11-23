@@ -1,0 +1,47 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2711", "brcm,bcm2835";
+
+	/* Tat spidev0 de tranh xung dot tren SPI0 CE0 (spi0.0) */
+	fragment@0 {
+		target = <&spidev0>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	/* Cau hinh chan DC (GPIO24) va RESET (GPIO25) lam Output */
+	fragment@1 {
+		target = <&gpio>;
+		__overlay__ {
+			st7735r_pins: st7735r_pins {
+				brcm,pins = <24 25>;     /* GPIO24 = DC, GPIO25 = RESET */
+				brcm,function = <1 1>;   /* 1 = Output */
+			};
+		};
+	};
+
+	/* Bat SPI0 va gan node man hinh TFT 1.8" ST7735R tai CE0 */
+	fragment@2 {
+		target = <&spi0>;
+		__overlay__ {
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			display@0 {
+				compatible = "jianda,jd-t18003-t01", "sitronix,st7735r";
+				reg = <0>;                        /* SPI0 CE0 (GPIO8) */
+				pinctrl-names = "default";
+				pinctrl-0 = <&st7735r_pins>;
+				spi-max-frequency = <16000000>;   /* 16 MHz on dinh tren day cam */
+				dc-gpios = <&gpio 24 0>;          /* GPIO24, ACTIVE_HIGH */
+				reset-gpios = <&gpio 25 0>;       /* GPIO25, ACTIVE_HIGH (theo drm_mipi_dbi) */
+				rotation = <0>;                   /* 0, 90, 180 hoac 270 */
+				status = "okay";
+			};
+		};
+	};
+};

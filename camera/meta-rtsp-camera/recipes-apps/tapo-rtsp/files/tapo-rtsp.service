@@ -1,0 +1,22 @@
+[Unit]
+Description=Tapo H.264 RTSP receiver
+Wants=NetworkManager.service
+After=NetworkManager.service
+ConditionPathExists=/etc/tapo-rtsp.conf
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/bin/tapo-rtsp /etc/tapo-rtsp.conf
+NotifyAccess=main
+WatchdogSec=20s
+TimeoutStopSec=5s
+WatchdogSignal=SIGKILL
+Restart=on-failure
+RestartSec=2s
+RestartPreventExitStatus=78
+RuntimeDirectory=tapo-rtsp
+RuntimeDirectoryMode=0700
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

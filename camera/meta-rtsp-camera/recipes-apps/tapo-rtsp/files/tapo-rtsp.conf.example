@@ -1,0 +1,8 @@
+[camera]
+url=rtsp://192.168.1.50:554/stream2
+username=CAMERA_USER
+password=CAMERA_PASSWORD
+transport=udp
+latency-ms=35
+# Enable temporarily to measure end-to-end latency with a clock in the scene.
+snapshot=false
