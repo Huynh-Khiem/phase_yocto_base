@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <gst/app/gstappsink.h>
 #include <gst/rtsp/gstrtsptransport.h>
@@ -15,6 +16,7 @@
 #define FRAME_TIMEOUT_US (4 * G_USEC_PER_SEC)
 #define REPORT_INTERVAL_US (2 * G_USEC_PER_SEC)
 #define SNAPSHOT_PATH "/run/tapo-rtsp/latest.pgm"
+#define AI_FRAME_PATH "/run/tapo-rtsp/latest.ppm"
 
 static volatile sig_atomic_t stopping;
 
@@ -48,7 +50,7 @@ static gboolean select_video(GstElement *source, guint stream, GstCaps *caps,
            encoding && g_ascii_strcasecmp(encoding, "H264") == 0;
 }
 
-static gboolean write_snapshot(GstSample *sample, gint64 received_us)
+static gboolean write_frame(GstSample *sample, gint64 received_us, gboolean rgb)
 {
     GstVideoInfo info;
     GstVideoFrame frame;
@@ -59,20 +61,33 @@ static gboolean write_snapshot(GstSample *sample, gint64 received_us)
 
     guint width = GST_VIDEO_FRAME_WIDTH(&frame);
     guint height = GST_VIDEO_FRAME_HEIGHT(&frame);
+    gboolean source_rgb = GST_VIDEO_FRAME_FORMAT(&frame) == GST_VIDEO_FORMAT_RGB;
+    guint row_size = width * (rgb ? 3 : 1);
     g_autofree gchar *header = g_strdup_printf(
-        "P5\n# received_unix_us=%" G_GINT64_FORMAT "\n%u %u\n255\n",
-        received_us, width, height);
+        "%s\n# received_unix_us=%" G_GINT64_FORMAT "\n%u %u\n255\n",
+        rgb ? "P6" : "P5", received_us, width, height);
     gsize header_size = strlen(header);
-    g_autoptr(GByteArray) image = g_byte_array_sized_new(header_size + width * height);
+    g_autoptr(GByteArray) image = g_byte_array_sized_new(header_size + row_size * height);
     g_byte_array_append(image, (const guint8 *)header, header_size);
     const guint8 *pixels = GST_VIDEO_FRAME_PLANE_DATA(&frame, 0);
     gint stride = GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0);
 
-    for (guint row = 0; row < height; row++)
-        g_byte_array_append(image, pixels + (gssize)row * stride, width);
+    g_autofree guint8 *gray = source_rgb && !rgb ? g_malloc(width) : NULL;
+    for (guint row = 0; row < height; row++) {
+        const guint8 *line = pixels + (gssize)row * stride;
+        if (gray) {
+            for (guint x = 0; x < width; x++)
+                gray[x] = (77 * line[3*x] + 150 * line[3*x+1] + 29 * line[3*x+2] + 128) >> 8;
+            line = gray;
+        }
+        g_byte_array_append(image, line, row_size);
+    }
 
     gst_video_frame_unmap(&frame);
-    return g_file_set_contents(SNAPSHOT_PATH, (const gchar *)image->data, image->len, NULL);
+    return g_file_set_contents_full(rgb ? AI_FRAME_PATH : SNAPSHOT_PATH,
+                                    (const gchar *)image->data, image->len,
+                                    G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_ONLY_EXISTING,
+                                    0600, NULL);
 }
 
 static bool stream_failed(GstBus *bus)
@@ -95,7 +110,7 @@ static bool stream_failed(GstBus *bus)
     return true;
 }
 
-static int receive_frames(GstElement *pipeline, GstAppSink *sink, bool snapshot)
+static int receive_frames(GstElement *pipeline, GstAppSink *sink, bool snapshot, bool ai_frames)
 {
     g_autoptr(GstBus) bus = gst_element_get_bus(pipeline);
     if (gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE) {
@@ -115,6 +130,7 @@ static int receive_frames(GstElement *pipeline, GstAppSink *sink, bool snapshot)
     gint64 deadline = report_start + STARTUP_TIMEOUT_US;
     guint64 frames = 0;
     guint report_frames = 0;
+    gint64 next_export_warning = 0;
 
     while (!stopping) {
         if (stream_failed(bus))
@@ -138,11 +154,15 @@ static int receive_frames(GstElement *pipeline, GstAppSink *sink, bool snapshot)
             frames++;
             report_frames++;
             deadline = now + FRAME_TIMEOUT_US;
+            if (ai_frames && !write_frame(sample, received_us, TRUE) && now >= next_export_warning) {
+                g_printerr("Cannot write " AI_FRAME_PATH "\n");
+                next_export_warning = now + REPORT_INTERVAL_US;
+            }
             if (now - report_start >= REPORT_INTERVAL_US) {
                 g_print("frames=%" G_GUINT64_FORMAT " fps=%.1f latest_gap_ms=%.1f\n",
                         frames, report_frames * (double)G_USEC_PER_SEC / (now - report_start),
                         (now - last_frame) / 1000.0);
-                if (snapshot && !write_snapshot(sample, received_us))
+                if (snapshot && !write_frame(sample, received_us, FALSE))
                     g_printerr("Cannot write " SNAPSHOT_PATH "\n");
                 report_start = now;
                 report_frames = 0;
@@ -206,13 +226,23 @@ int main(int argc, char **argv)
         }
     }
 
+    bool ai_frames = false;
+    if (g_key_file_has_key(config, "camera", "ai-frames", NULL)) {
+        ai_frames = g_key_file_get_boolean(config, "camera", "ai-frames", &error);
+        if (error) {
+            g_printerr("ai-frames must be true or false\n");
+            return CONFIG_ERROR;
+        }
+    }
+
     gst_init(NULL, NULL);
 
-    g_autoptr(GstElement) pipeline = gst_parse_launch(
+    g_autofree gchar *description = g_strdup_printf(
         "rtspsrc name=camera ! rtph264depay ! h264parse ! avdec_h264 max-threads=1 "
-        "! videoconvert ! video/x-raw,format=GRAY8 "
+        "! videoconvert ! video/x-raw,format=%s "
         "! appsink name=frames sync=false max-buffers=1 drop=true wait-on-eos=false",
-        &error);
+        ai_frames ? "RGB" : "GRAY8");
+    g_autoptr(GstElement) pipeline = gst_parse_launch(description, &error);
     if (error || !pipeline) {
         g_printerr("Cannot create pipeline: %s\n", error ? error->message : "unknown error");
         return CONFIG_ERROR;
@@ -230,7 +260,9 @@ int main(int argc, char **argv)
     g_signal_connect(source, "select-stream", G_CALLBACK(select_video), NULL);
 
     g_print("Starting RTSP receiver transport=%s buffer_ms=%d\n", transport, latency_ms);
-    int result = receive_frames(pipeline, GST_APP_SINK(sink), snapshot);
+    int result = receive_frames(pipeline, GST_APP_SINK(sink), snapshot, ai_frames);
     gst_element_set_state(pipeline, GST_STATE_NULL);
+    if (ai_frames)
+        unlink(AI_FRAME_PATH);
     return result;
 }

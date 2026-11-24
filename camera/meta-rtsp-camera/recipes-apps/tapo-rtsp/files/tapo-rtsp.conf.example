@@ -6,3 +6,5 @@ transport=udp
 latency-ms=35
 # Enable temporarily to measure end-to-end latency with a clock in the scene.
 snapshot=false
+# Publish the newest RGB frame for attendance-ai.
+ai-frames=false

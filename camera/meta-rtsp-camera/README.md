@@ -76,6 +76,10 @@ Sau khi chỉnh cấu hình, khởi động lại service.
 - `tapo-rtsp.c` tạo pipeline GStreamer, lọc luồng video H.264, tháo RTP, parse H.264,
   giải mã bằng `avdec_h264` và đưa frame GRAY8 vào appsink. Bộ đệm RTP mặc định
   là 35 ms, appsink giữ tối đa một frame và bỏ frame cũ khi app đọc chậm.
+- Đặt `ai-frames=true` trong mục `[camera]` của `/etc/tapo-rtsp.conf` và khởi động lại
+  service để appsink nhận RGB. Camera thay thế nguyên tử file PPM mới nhất ở
+  `/run/tapo-rtsp/latest.ppm`, kèm thời điểm nhận frame theo microgiây Unix.
+  `attendance-ai` đọc file này và dùng kết nối RTSP đang chạy của camera.
 - Vòng lặp đợi frame từng đợt tối đa 100 ms. App thoát với mã lỗi khi gặp lỗi pipeline,
   hết stream, sau 12 giây không có frame đầu tiên hoặc 4 giây không có frame mới.
   systemd thử chạy lại sau 2 giây. Watchdog 20 giây xử lý trường hợp pipeline kẹt
