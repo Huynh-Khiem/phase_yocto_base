@@ -1,0 +1,79 @@
+Upstream-Status: Inappropriate [project-specific display mode]
+
+--- a/tft_test.c
++++ b/tft_test.c
+@@ -233,7 +233,7 @@
+ 	}
+ }
+ 
+-static int prepare_frame(struct fb_ctx *ctx)
++static int prepare_frame(struct fb_ctx *ctx, const char *title, const char *detail)
+ {
+ 	size_t stride = ctx->finfo.line_length;
+ 	uint32_t bpp = ctx->vinfo.bits_per_pixel;
+@@ -252,10 +252,25 @@
+ 		return -1;
+ 	}
+ 
+-	draw_text(ctx, frame, 8, 9, "PI 4B - ST7735R", 1);
+-	draw_text(ctx, frame, 8, 40, "HELLO", 2);
+-	draw_text(ctx, frame, 8, 64, "YOCTO!", 2);
+-	draw_text(ctx, frame, 8, 98, "Status: OK", 1);
++	if (title) {
++		draw_text(ctx, frame, 8, 20, title, 1);
++		size_t columns = ctx->vinfo.xres > 16 ? (ctx->vinfo.xres - 16) / 8 : 0;
++		for (int y = 42; columns && *detail && (uint32_t)y < ctx->vinfo.yres; y += 12) {
++			char line[65];
++			size_t count = strnlen(detail, sizeof(line) - 1);
++			if (count > columns)
++				count = columns;
++			memcpy(line, detail, count);
++			line[count] = '\0';
++			draw_text(ctx, frame, 8, y, line, 1);
++			detail += count;
++		}
++	} else {
++		draw_text(ctx, frame, 8, 9, "PI 4B - ST7735R", 1);
++		draw_text(ctx, frame, 8, 40, "HELLO", 2);
++		draw_text(ctx, frame, 8, 64, "YOCTO!", 2);
++		draw_text(ctx, frame, 8, 98, "Status: OK", 1);
++	}
+ 	ctx->frame = frame;
+ 	return 0;
+ }
+@@ -268,9 +283,25 @@
+ 	       ioctl(ctx->fd, FBIOGET_VSCREENINFO, &vinfo) == 0;
+ }
+ 
+-int main(void)
++int main(int argc, char **argv)
+ {
+ 	struct fb_ctx ctx = { .fd = -1 };
++
++	if (argc == 4 && strcmp(argv[1], "--show") == 0) {
++		if (fb_open_st7735r(&ctx) < 0) {
++			fprintf(stderr, "[TFT] Khong mo duoc man hinh ST7735R.\n");
++			return EXIT_FAILURE;
++		}
++		int result = prepare_frame(&ctx, argv[2], argv[3]);
++		if (result == 0)
++			memcpy(ctx.mem, ctx.frame, ctx.frame_size);
++		fb_close(&ctx);
++		return result == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
++	}
++	if (argc != 1) {
++		fprintf(stderr, "Usage: tft-test [--show TITLE DETAIL]\n");
++		return EXIT_FAILURE;
++	}
+ 
+ 	signal(SIGINT, handle_sig);
+ 	signal(SIGTERM, handle_sig);
+@@ -287,7 +318,7 @@
+ 				sleep(RECONNECT_RETRY_SEC);
+ 				continue;
+ 			}
+-			if (prepare_frame(&ctx) < 0) {
++			if (prepare_frame(&ctx, NULL, NULL) < 0) {
+ 				fb_close(&ctx);
+ 				return EXIT_FAILURE;
+ 			}

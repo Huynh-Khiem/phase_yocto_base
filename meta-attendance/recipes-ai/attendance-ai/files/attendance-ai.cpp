@@ -527,24 +527,25 @@ private:
     std::array<std::thread, 2> workers_;
 };
 
-int run_live(FaceEngine& engine, const std::vector<Reference>& references, float threshold)
+int run_live(FaceEngine& engine, const std::vector<Reference>& references, float threshold,
+             const fs::path& frame_file)
 {
     FrameWorkers workers(engine, references, threshold);
-    std::cerr << "Waiting for " << live_frame << " (2 inference workers, " << references.size()
+    std::cerr << "Waiting for " << frame_file << " (2 inference workers, " << references.size()
               << " references loaded)\n";
     timespec last_write{};
     int64_t previous_frame = 0;
     while (!stopping && !workers.failed()) {
         struct stat state {};
-        if (stat(live_frame, &state) == 0 &&
+        if (stat(frame_file.c_str(), &state) == 0 &&
             (state.st_mtim.tv_sec != last_write.tv_sec || state.st_mtim.tv_nsec != last_write.tv_nsec)) {
             last_write = state.st_mtim;
             Frame frame;
             try {
-                frame = read_ppm(live_frame);
+                frame = read_ppm(frame_file);
             } catch (const std::exception& error) {
                 // The camera may remove the frame while its service restarts.
-                if (fs::exists(live_frame))
+                if (fs::exists(frame_file))
                     std::cerr << error.what() << '\n';
             }
             if (frame.received_us != previous_frame && fresh(frame)) {
@@ -559,7 +560,7 @@ int run_live(FaceEngine& engine, const std::vector<Reference>& references, float
 
 void usage()
 {
-    std::cout << "Usage: attendance-ai [--image P6.ppm] [--db DIRECTORY] [--threshold COSINE]\n"
+    std::cout << "Usage: attendance-ai [--image P6.ppm | --frame-file PATH] [--db DIRECTORY] [--threshold COSINE]\n"
                  "       Default cosine threshold: 0.60. Minimum lead over second match: 0.10.\n"
                  "       attendance-ai --enroll ID [--image P6.ppm] [--db DIRECTORY]\n";
 }
@@ -575,6 +576,7 @@ int main(int argc, char** argv)
     try {
         fs::path db = "/var/lib/attendance-ai";
         fs::path image;
+        fs::path frame_file = live_frame;
         std::string enroll;
         float threshold = default_match_threshold;
         for (int i = 1; i < argc; i++) {
@@ -583,7 +585,7 @@ int main(int argc, char** argv)
                 usage();
                 return 0;
             }
-            if (option != "--db" && option != "--image" && option != "--enroll" &&
+            if (option != "--db" && option != "--image" && option != "--enroll" && option != "--frame-file" &&
                 option != "--threshold")
                 throw std::runtime_error("Unknown option: " + option);
             if (++i == argc || !*argv[i])
@@ -593,6 +595,8 @@ int main(int argc, char** argv)
                 db = value;
             else if (option == "--image")
                 image = value;
+            else if (option == "--frame-file")
+                frame_file = value;
             else if (option == "--enroll")
                 enroll = value;
             else {
@@ -608,7 +612,7 @@ int main(int argc, char** argv)
 
         FaceEngine engine;
         if (!enroll.empty()) {
-            const auto frame = read_ppm(image.empty() ? fs::path(live_frame) : image);
+            const auto frame = read_ppm(image.empty() ? frame_file : image);
             if (image.empty() && !fresh(frame))
                 throw std::runtime_error("Camera frame is older than five seconds or its timestamp is invalid");
             const auto faces = engine.process(frame);
@@ -625,7 +629,7 @@ int main(int argc, char** argv)
             std::cout << evaluate(engine, read_ppm(image), references, threshold);
             return 0;
         }
-        return run_live(engine, references, threshold);
+        return run_live(engine, references, threshold, frame_file);
     } catch (const std::exception& error) {
         std::cerr << "attendance-ai: " << error.what() << '\n';
         return 1;

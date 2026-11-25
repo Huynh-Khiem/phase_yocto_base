@@ -1,0 +1,21 @@
+[Unit]
+Description=PIR-triggered face attendance
+ConditionPathExists=/etc/tapo-rtsp.conf
+Wants=NetworkManager.service
+After=NetworkManager.service
+Conflicts=tapo-rtsp.service
+After=tapo-rtsp.service
+
+[Service]
+ExecStart=/usr/bin/attendance-system
+RuntimeDirectory=attendance-system
+RuntimeDirectoryMode=0700
+StateDirectory=attendance-system
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=4s
+
+[Install]
+WantedBy=multi-user.target
