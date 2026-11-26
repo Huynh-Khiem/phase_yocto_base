@@ -47,7 +47,9 @@ namespace fs = std::filesystem;
 constexpr char frame_file[] = RUN_DIR "/latest.ppm";
 constexpr char database_file[] = STATE_DIR "/attendance.db";
 constexpr char motion[] = "phat hien chuyen dong";
+constexpr char no_motion[] = "khong phat hien chuyen dong";
 constexpr auto ai_timeout = 8s;
+constexpr auto pir_quiet_period = 3s;
 std::atomic<bool> stopping{false};
 static_assert(std::atomic<bool>::is_always_lock_free);
 
@@ -369,17 +371,10 @@ public:
         if (rc != SQLITE_OK)
             throw std::runtime_error(handle ? sqlite3_errmsg(handle) : "Cannot allocate SQLite connection");
         check(sqlite3_busy_timeout(db_.get(), 2000), SQLITE_OK);
-        check(sqlite3_exec(db_.get(),
-            "CREATE TABLE IF NOT EXISTS attendance_events ("
-            "event_id INTEGER PRIMARY KEY, started_ms INTEGER NOT NULL, "
-            "finished_ms INTEGER NOT NULL, status TEXT NOT NULL, "
-            "person_id TEXT, frame_us INTEGER, cosine REAL);"
-            "CREATE VIEW IF NOT EXISTS attendance AS "
-            "SELECT * FROM attendance_events WHERE status = 'match';",
-            nullptr, nullptr, nullptr), SQLITE_OK);
+        migrate();
     }
 
-    void record(int64_t started, const Result& result)
+    bool record(int64_t started, const Result& result)
     {
         auto stmt = prepare("INSERT INTO attendance_events "
                             "(started_ms,finished_ms,status,person_id,frame_us,cosine) "
@@ -394,13 +389,14 @@ public:
         if (result.cosine)
             check(sqlite3_bind_double(stmt.get(), 6, *result.cosine), SQLITE_OK);
         check(sqlite3_step(stmt.get()), SQLITE_DONE);
+        return sqlite3_changes(db_.get()) != 0;
     }
 
     void history()
     {
         auto stmt = prepare("SELECT datetime(finished_ms / 1000, 'unixepoch'), "
                             "status, COALESCE(person_id, '-'), COALESCE(cosine, '-') "
-                            "FROM attendance_events ORDER BY event_id DESC LIMIT 20;");
+                            "FROM attendance_results ORDER BY event_id DESC LIMIT 20;");
         std::cout << "UTC\tStatus\tID\tCosine\n";
         int rc;
         while ((rc = sqlite3_step(stmt.get())) == SQLITE_ROW) {
@@ -412,6 +408,43 @@ public:
 
 private:
     using Statement = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>;
+
+    void migrate()
+    {
+        {
+            auto version = prepare("PRAGMA user_version;");
+            check(sqlite3_step(version.get()), SQLITE_ROW);
+            if (sqlite3_column_int(version.get(), 0) >= 1)
+                return;
+        }
+
+        // Keep the original rows and expose the first saved match for each Vietnamese date.
+        check(sqlite3_exec(db_.get(),
+            "BEGIN IMMEDIATE;"
+            "CREATE TABLE IF NOT EXISTS attendance_events ("
+            "event_id INTEGER PRIMARY KEY, started_ms INTEGER NOT NULL, "
+            "finished_ms INTEGER NOT NULL, status TEXT NOT NULL, "
+            "person_id TEXT, frame_us INTEGER, cosine REAL);"
+            "CREATE INDEX IF NOT EXISTS attendance_match_day "
+            "ON attendance_events (person_id, date(finished_ms / 1000.0, 'unixepoch', '+7 hours')) "
+            "WHERE status = 'match';"
+            "CREATE TRIGGER IF NOT EXISTS one_match_per_day BEFORE INSERT ON attendance_events "
+            "WHEN NEW.status = 'match' AND EXISTS ("
+            "SELECT 1 FROM attendance_events WHERE status = 'match' AND person_id = NEW.person_id "
+            "AND date(finished_ms / 1000.0, 'unixepoch', '+7 hours') = "
+            "date(NEW.finished_ms / 1000.0, 'unixepoch', '+7 hours')) "
+            "BEGIN SELECT RAISE(IGNORE); END;"
+            "CREATE VIEW IF NOT EXISTS attendance_results AS "
+            "SELECT e.* FROM attendance_events e WHERE e.status <> 'match' OR e.event_id = ("
+            "SELECT min(a.event_id) FROM attendance_events a WHERE a.status = 'match' "
+            "AND a.person_id IS e.person_id AND "
+            "date(a.finished_ms / 1000.0, 'unixepoch', '+7 hours') = "
+            "date(e.finished_ms / 1000.0, 'unixepoch', '+7 hours'));"
+            "DROP VIEW IF EXISTS attendance;"
+            "CREATE VIEW attendance AS SELECT * FROM attendance_results WHERE status = 'match';"
+            "PRAGMA user_version = 1;"
+            "COMMIT;", nullptr, nullptr, nullptr), SQLITE_OK);
+    }
 
     Statement prepare(const char* sql)
     {
@@ -452,21 +485,24 @@ void publish(Database& database, Session& session)
     if (stopping.load() || result.status == "cancelled")
         return;
 
+    bool recorded;
     try {
-        database.record(session.started_ms, result);
+        recorded = database.record(session.started_ms, result);
     } catch (const std::exception& error) {
         show("LOI LUU DU LIEU");
         throw;
     }
 
-    std::cout << "result=" << result.status;
+    std::cout << "result=" << (recorded ? result.status : "already-recorded");
     if (!result.person.empty())
         std::cout << " id=" << result.person;
     if (result.cosine)
         std::cout << " cosine=" << *result.cosine;
     std::cout << std::endl;
 
-    if (result.status == "match")
+    if (!recorded)
+        show("DA DIEM DANH", result.person);
+    else if (result.status == "match")
         show("DIEM DANH OK", result.person);
     else if (result.status == "unknown")
         show("KHONG NHAN RA");
@@ -486,20 +522,41 @@ void run_pir(Database& database)
 {
     Child pir({BIN_DIR "/pir-test"}, true);
     std::unique_ptr<Session> session;
+    bool armed = true;
+    std::optional<Clock::time_point> low_since;
     std::cout << "Waiting for /dev/m_device" << std::endl;
 
     while (!stopping.load()) {
         if (session && session->ready()) {
-            // Consume any PIR transitions queued during this session before rearming.
-            while (pir.line(0)) {}
             publish(database, *session);
             session.reset();
-            while (pir.line(0)) {}
+            if (low_since)
+                low_since = Clock::now();
         }
+
         const auto event = pir.line(50);
         if (!event && !pir.output_open() && !stopping.load())
             throw std::runtime_error("PIR reader exited; check /dev/m_device");
-        if (event && *event == motion && !session) {
+
+        const auto now = Clock::now();
+        if (!armed && !session && low_since && now - *low_since >= pir_quiet_period) {
+            armed = true;
+            std::cout << "PIR rearmed after 3s LOW" << std::endl;
+        }
+        if (!event)
+            continue;
+
+        if (*event == no_motion) {
+            if (!low_since)
+                low_since = now;
+        } else if (*event == motion) {
+            low_since.reset();
+            if (!armed) {
+                if (!session)
+                    std::cout << "PIR trigger ignored, waiting for 3s LOW" << std::endl;
+                continue;
+            }
+            armed = false;
             std::cout << "Motion detected, starting camera and AI" << std::endl;
             session = std::make_unique<Session>();
         }

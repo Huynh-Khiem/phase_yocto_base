@@ -1,0 +1,17 @@
+[Unit]
+Description=Attendance web dashboard
+After=network.target attendance-system.service
+
+[Service]
+ExecStart=/usr/bin/attendance-web 0.0.0.0 8080
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Điểm danh · Giám sát Raspberry Pi</title>
+  <link rel="stylesheet" href="/dashboard.css">
+  <script src="/dashboard.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="shell top-inner">
+      <p class="brand">Điểm danh <span>Raspberry Pi</span></p>
+      <span class="badge badge-neutral" id="connection" role="status">Đang kết nối</span>
+    </div>
+  </header>
+  <main class="shell">
+    <h1>Giám sát hệ thống</h1>
+    <div class="panels">
+      <section class="panel" aria-labelledby="process-title">
+        <div class="panel-heading">
+          <h2 id="process-title">Tiến trình</h2>
+          <span id="process-count" class="meta"></span>
+        </div>
+        <p id="process-message" class="empty">Đang đọc trạng thái…</p>
+        <ul id="process-list" class="process-list" hidden></ul>
+      </section>
+
+      <section class="panel" aria-labelledby="results-title">
+        <div class="panel-heading">
+          <h2 id="results-title">Kết quả nhận diện</h2>
+          <span class="meta">30 lượt gần nhất</span>
+        </div>
+        <p id="results-message" class="empty">Đang đọc kết quả…</p>
+        <div id="results-wrap" class="table-wrap" hidden>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Thời gian <span class="time-zone">(VN)</span></th>
+                <th scope="col">Kết quả</th>
+                <th scope="col">Mã</th>
+                <th scope="col" class="score">Cosine</th>
+              </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
