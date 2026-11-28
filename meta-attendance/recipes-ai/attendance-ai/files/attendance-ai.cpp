@@ -437,8 +437,9 @@ std::string evaluate(FaceEngine& engine, const Frame& frame,
 
 class FrameWorkers {
 public:
-    FrameWorkers(FaceEngine& engine, const std::vector<Reference>& references, float threshold)
-        : engine_(engine), references_(references), threshold_(threshold)
+    FrameWorkers(FaceEngine& engine, std::vector<Reference> references, float threshold)
+        : engine_(engine), references_(std::make_shared<const std::vector<Reference>>(std::move(references))),
+          threshold_(threshold)
     {
         try {
             for (auto& worker : workers_)
@@ -469,6 +470,13 @@ public:
         return failed_;
     }
 
+    void update_references(std::vector<Reference> references)
+    {
+        auto snapshot = std::make_shared<const std::vector<Reference>>(std::move(references));
+        std::lock_guard<std::mutex> lock(mutex_);
+        references_ = std::move(snapshot);
+    }
+
 private:
     void close()
     {
@@ -486,6 +494,7 @@ private:
     {
         for (;;) {
             Frame frame;
+            std::shared_ptr<const std::vector<Reference>> references;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
                 ready_.wait(lock, [&] { return closed_ || pending_.has_value(); });
@@ -493,10 +502,11 @@ private:
                     return;
                 frame = std::move(*pending_);
                 pending_.reset();
+                references = references_;
             }
 
             try {
-                const auto result = evaluate(engine_, frame, references_, threshold_);
+                const auto result = evaluate(engine_, frame, *references, threshold_);
                 std::lock_guard<std::mutex> lock(output_mutex_);
                 std::cout << result << std::flush;
             } catch (const std::exception& error) {
@@ -516,7 +526,7 @@ private:
     }
 
     FaceEngine& engine_;
-    const std::vector<Reference>& references_;
+    std::shared_ptr<const std::vector<Reference>> references_;
     const float threshold_;
     std::mutex mutex_;
     std::mutex output_mutex_;
@@ -527,11 +537,15 @@ private:
     std::array<std::thread, 2> workers_;
 };
 
-int run_live(FaceEngine& engine, const std::vector<Reference>& references, float threshold,
+int run_live(FaceEngine& engine, const fs::path& db, float threshold,
              const fs::path& frame_file)
 {
-    FrameWorkers workers(engine, references, threshold);
-    std::cerr << "Waiting for " << frame_file << " (2 inference workers, " << references.size()
+    std::error_code error;
+    auto db_version = fs::last_write_time(db, error);
+    auto references = load_references(db);
+    const auto reference_count = references.size();
+    FrameWorkers workers(engine, std::move(references), threshold);
+    std::cerr << "Waiting for " << frame_file << " (2 inference workers, " << reference_count
               << " references loaded)\n";
     timespec last_write{};
     int64_t previous_frame = 0;
@@ -549,6 +563,12 @@ int run_live(FaceEngine& engine, const std::vector<Reference>& references, float
                     std::cerr << error.what() << '\n';
             }
             if (frame.received_us != previous_frame && fresh(frame)) {
+                // Enrollment publishes each reference by renaming it into the directory.
+                const auto version = fs::last_write_time(db, error);
+                if (version != db_version) {
+                    workers.update_references(load_references(db));
+                    db_version = version;
+                }
                 previous_frame = frame.received_us;
                 workers.submit(std::move(frame));
             }
@@ -624,12 +644,11 @@ int main(int argc, char** argv)
             return 0;
         }
 
-        const auto references = load_references(db);
         if (!image.empty()) {
-            std::cout << evaluate(engine, read_ppm(image), references, threshold);
+            std::cout << evaluate(engine, read_ppm(image), load_references(db), threshold);
             return 0;
         }
-        return run_live(engine, references, threshold, frame_file);
+        return run_live(engine, db, threshold, frame_file);
     } catch (const std::exception& error) {
         std::cerr << "attendance-ai: " << error.what() << '\n';
         return 1;

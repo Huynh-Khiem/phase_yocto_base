@@ -131,7 +131,7 @@ void append_column(std::ostream& output, sqlite3_stmt* statement, int column)
     append_json_string(output, std::string_view(value, sqlite3_column_bytes(statement, column)));
 }
 
-std::string event_snapshot()
+std::string event_snapshot(bool attendance_only = false, const char* day = nullptr)
 {
     if (!fs::exists(database_path))
         return "[]";
@@ -143,12 +143,18 @@ std::string event_snapshot()
         throw std::runtime_error("Cannot read the attendance database");
 
     sqlite3_stmt* query = nullptr;
-    const int prepared = sqlite3_prepare_v2(handle,
+    const char* sql = attendance_only ?
+        "SELECT event_id, finished_ms, status, person_id, cosine FROM attendance "
+        "WHERE date(finished_ms / 1000.0, 'unixepoch', '+7 hours') = "
+        "coalesce(?1, date('now', '+7 hours')) ORDER BY finished_ms, event_id" :
         "SELECT event_id, finished_ms, status, person_id, cosine "
-        "FROM attendance_results ORDER BY event_id DESC LIMIT 30", -1, &query, nullptr);
+        "FROM attendance_results ORDER BY event_id DESC LIMIT 30";
+    const int prepared = sqlite3_prepare_v2(handle, sql, -1, &query, nullptr);
     std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(query, sqlite3_finalize);
     if (prepared != SQLITE_OK)
         throw std::runtime_error("Cannot query attendance results");
+    if (day && sqlite3_bind_text(query, 1, day, -1, SQLITE_TRANSIENT) != SQLITE_OK)
+        throw std::runtime_error("Cannot bind attendance date");
 
     std::ostringstream json;
     json.imbue(std::locale::classic());
@@ -219,6 +225,18 @@ MHD_Result handle(void* context, MHD_Connection* connection, const char* url,
             return reply(connection, MHD_HTTP_OK, json, process_snapshot());
         if (path == "/api/results")
             return reply(connection, MHD_HTTP_OK, json, event_snapshot());
+        if (path == "/api/attendance") {
+            const char* day = MHD_lookup_connection_value(connection, MHD_GET_ARGUMENT_KIND, "date");
+            if (day) {
+                const std::string_view value(day);
+                if (value.size() != 10 || value[4] != '-' || value[7] != '-' ||
+                    value.substr(0, 4).find_first_not_of("0123456789") != value.npos ||
+                    value.substr(5, 2).find_first_not_of("0123456789") != value.npos ||
+                    value.substr(8, 2).find_first_not_of("0123456789") != value.npos)
+                    return reply(connection, MHD_HTTP_BAD_REQUEST, json, R"({"error":"invalid-date"})");
+            }
+            return reply(connection, MHD_HTTP_OK, json, event_snapshot(true, day));
+        }
         return reply(connection, MHD_HTTP_NOT_FOUND, json, R"({"error":"not-found"})");
     } catch (const std::exception&) {
         return reply(connection, MHD_HTTP_SERVICE_UNAVAILABLE, json, R"({"error":"temporarily-unavailable"})");

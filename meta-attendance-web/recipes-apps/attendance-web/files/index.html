@@ -26,6 +26,30 @@
         <ul id="process-list" class="process-list" hidden></ul>
       </section>
 
+      <div class="results-panels">
+      <section class="panel" aria-labelledby="attendance-title">
+        <div class="panel-heading">
+          <div>
+            <h2 id="attendance-title">Danh sách đã điểm danh</h2>
+            <span id="attendance-count" class="meta"></span>
+          </div>
+          <label class="date-filter">Ngày <input type="date" id="attendance-date"></label>
+        </div>
+        <p id="attendance-message" class="empty">Đang đọc danh sách…</p>
+        <div id="attendance-wrap" class="table-wrap" hidden>
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Mã</th>
+                <th scope="col">Thời gian <span class="time-zone">(VN)</span></th>
+                <th scope="col" class="score">Cosine</th>
+              </tr>
+            </thead>
+            <tbody id="attendance-body"></tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="panel" aria-labelledby="results-title">
         <div class="panel-heading">
           <h2 id="results-title">Kết quả nhận diện</h2>
@@ -46,6 +70,7 @@
           </table>
         </div>
       </section>
+      </div>
     </div>
   </main>
 </body>

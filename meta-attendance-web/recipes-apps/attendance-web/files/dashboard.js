@@ -23,6 +23,7 @@ const dateFormat = new Intl.DateTimeFormat("vi-VN", {
     dateStyle: "short",
     timeStyle: "medium",
 });
+const vietnamDate = new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Ho_Chi_Minh" });
 
 const processList = document.getElementById("process-list");
 const processMessage = document.getElementById("process-message");
@@ -30,7 +31,14 @@ const processCount = document.getElementById("process-count");
 const resultWrap = document.getElementById("results-wrap");
 const resultBody = document.getElementById("results-body");
 const resultMessage = document.getElementById("results-message");
+const attendanceDate = document.getElementById("attendance-date");
+const attendanceCount = document.getElementById("attendance-count");
+const attendanceWrap = document.getElementById("attendance-wrap");
+const attendanceBody = document.getElementById("attendance-body");
+const attendanceMessage = document.getElementById("attendance-message");
 const connection = document.getElementById("connection");
+let followToday = true;
+let attendanceRequest = 0;
 
 function element(tag, text, className) {
     const node = document.createElement(tag);
@@ -41,6 +49,15 @@ function element(tag, text, className) {
 
 function badge(text, tone) {
     return element("span", text, `badge badge-${tone}`);
+}
+
+function timeCell(finishedMs) {
+    const date = new Date(finishedMs);
+    const time = element("time", dateFormat.format(date));
+    time.dateTime = date.toISOString();
+    const cell = element("td");
+    cell.append(time);
+    return cell;
 }
 
 function showProcesses(processes) {
@@ -76,14 +93,9 @@ function showResults(results) {
     resultBody.replaceChildren(...results.map(({ finished_ms, status, person_id, cosine }) => {
         const [label, tone] = resultLabels[status] || [status, "neutral"];
         const row = element("tr");
-        const date = new Date(finished_ms);
-        const time = element("time", dateFormat.format(date));
-        time.dateTime = date.toISOString();
-        const timeCell = element("td");
-        timeCell.append(time);
         const statusCell = element("td");
         statusCell.append(badge(label, tone));
-        row.append(timeCell, statusCell, element("td", person_id ?? "—", "person"),
+        row.append(timeCell(finished_ms), statusCell, element("td", person_id ?? "—", "person"),
                    element("td", cosine == null ? "—" : cosine.toFixed(3), "score"));
         return row;
     }));
@@ -98,11 +110,46 @@ async function read(url) {
     return response.json();
 }
 
+async function updateAttendance() {
+    if (followToday) attendanceDate.value = vietnamDate.format(new Date());
+    const request = ++attendanceRequest;
+    try {
+        const rows = await read("/api/attendance?date=" + encodeURIComponent(attendanceDate.value));
+        if (request !== attendanceRequest) return;
+        attendanceCount.textContent = `${rows.length} người`;
+        attendanceBody.replaceChildren(...rows.map(({ person_id, finished_ms, cosine }) => {
+            const row = element("tr");
+            row.append(element("td", person_id ?? "—", "person"), timeCell(finished_ms),
+                       element("td", cosine == null ? "—" : cosine.toFixed(3), "score"));
+            return row;
+        }));
+        attendanceMessage.textContent = "Chưa có ai điểm danh trong ngày này.";
+        attendanceMessage.hidden = rows.length > 0;
+        attendanceWrap.hidden = rows.length === 0;
+    } catch {
+        if (request !== attendanceRequest) return;
+        attendanceCount.textContent = "";
+        attendanceWrap.hidden = true;
+        attendanceMessage.textContent = "Chưa đọc được danh sách điểm danh.";
+        attendanceMessage.hidden = false;
+    }
+}
+
+attendanceDate.addEventListener("change", () => {
+    followToday = !attendanceDate.value || attendanceDate.value === vietnamDate.format(new Date());
+    attendanceCount.textContent = "";
+    attendanceWrap.hidden = true;
+    attendanceMessage.textContent = "Đang đọc danh sách…";
+    attendanceMessage.hidden = false;
+    updateAttendance();
+});
+
 async function update() {
     if (!document.hidden) {
         const [processes, results] = await Promise.allSettled([
             read("/api/status").then(showProcesses),
             read("/api/results").then(showResults),
+            updateAttendance(),
         ]);
 
         if (processes.status === "rejected") {

@@ -49,7 +49,7 @@ constexpr char database_file[] = STATE_DIR "/attendance.db";
 constexpr char motion[] = "phat hien chuyen dong";
 constexpr char no_motion[] = "khong phat hien chuyen dong";
 constexpr auto ai_timeout = 8s;
-constexpr auto pir_quiet_period = 3s;
+constexpr auto ai_idle_timeout = 30s;
 std::atomic<bool> stopping{false};
 static_assert(std::atomic<bool>::is_always_lock_free);
 
@@ -248,7 +248,8 @@ std::optional<Result> parse_result(const std::string& line)
 
 class Session {
 public:
-    Session() : started_ms(now_ms())
+    explicit Session(Child& ai)
+        : started_ms(now_ms()), ai_process_(ai)
     {
         fs::remove(frame_file);
         camera_ = std::thread(&Session::camera, this);
@@ -312,7 +313,6 @@ private:
         try {
             if (!stopping.load() && !finished_.load()) {
                 const auto launch = Clock::now();
-                Child ai({BIN_DIR "/attendance-ai", "--frame-file", frame_file}, true);
                 const auto deadline = launch + ai_timeout;
                 while (!stopping.load() && !finished_.load()) {
                     const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -320,8 +320,8 @@ private:
                     if (remaining <= 0ms)
                         break;
 
-                    auto line = ai.line(std::min(remaining, 50ms).count());
-                    if (!line && !ai.output_open()) {
+                    auto line = ai_process_.line(std::min(remaining, 50ms).count());
+                    if (!line && !ai_process_.output_open()) {
                         result_.status = "ai-error";
                         break;
                     }
@@ -329,7 +329,7 @@ private:
                         continue;
 
                     auto candidate = parse_result(*line);
-                    if (!candidate)
+                    if (!candidate || candidate->frame_us < started_ms * 1000)
                         continue;
                     if (candidate->status == "match") {
                         result_ = std::move(*candidate);
@@ -342,7 +342,6 @@ private:
                         (candidate->cosine && (!result_.cosine || *candidate->cosine > *result_.cosine)))
                         result_ = std::move(*candidate);
                 }
-                ai.terminate();
             }
         } catch (const std::exception& error) {
             result_.status = "ai-error";
@@ -353,6 +352,7 @@ private:
         finished_.store(true);
     }
 
+    Child& ai_process_;
     Result result_;
     std::atomic<bool> finished_{false};
     std::atomic<bool> camera_failed_{false};
@@ -521,8 +521,8 @@ void publish(Database& database, Session& session)
 void run_pir(Database& database)
 {
     Child pir({BIN_DIR "/pir-test"}, true);
+    std::unique_ptr<Child> ai;
     std::unique_ptr<Session> session;
-    bool armed = true;
     std::optional<Clock::time_point> low_since;
     std::cout << "Waiting for /dev/m_device" << std::endl;
 
@@ -530,8 +530,6 @@ void run_pir(Database& database)
         if (session && session->ready()) {
             publish(database, *session);
             session.reset();
-            if (low_since)
-                low_since = Clock::now();
         }
 
         const auto event = pir.line(50);
@@ -539,9 +537,15 @@ void run_pir(Database& database)
             throw std::runtime_error("PIR reader exited; check /dev/m_device");
 
         const auto now = Clock::now();
-        if (!armed && !session && low_since && now - *low_since >= pir_quiet_period) {
-            armed = true;
-            std::cout << "PIR rearmed after 3s LOW" << std::endl;
+        if (ai && !session && low_since && now - *low_since >= ai_idle_timeout) {
+            ai->terminate(true);
+            ai.reset();
+            std::cout << "AI stopped after 30s PIR LOW" << std::endl;
+        }
+        if (ai && !session) {
+            for (int i = 0; i < 16 && ai->line(0); ++i) {}
+            if (ai->exited())
+                ai.reset();
         }
         if (!event)
             continue;
@@ -551,14 +555,14 @@ void run_pir(Database& database)
                 low_since = now;
         } else if (*event == motion) {
             low_since.reset();
-            if (!armed) {
-                if (!session)
-                    std::cout << "PIR trigger ignored, waiting for 3s LOW" << std::endl;
+            if (session)
                 continue;
-            }
-            armed = false;
-            std::cout << "Motion detected, starting camera and AI" << std::endl;
-            session = std::make_unique<Session>();
+            std::cout << (ai ? "Motion detected, reusing AI" :
+                               "Motion detected, starting camera and AI") << std::endl;
+            if (!ai)
+                ai = std::make_unique<Child>(
+                    std::vector<std::string>{BIN_DIR "/attendance-ai", "--frame-file", frame_file}, true);
+            session = std::make_unique<Session>(*ai);
         }
     }
 }
@@ -595,7 +599,8 @@ int main(int argc, char** argv)
             throw system_error("Lock controller; check if attendance-system is already running");
 
         if (option == "--once") {
-            Session session;
+            Child ai({BIN_DIR "/attendance-ai", "--frame-file", frame_file}, true);
+            Session session(ai);
             publish(database, session);
         } else {
             show("CHO CHUYEN DONG");
